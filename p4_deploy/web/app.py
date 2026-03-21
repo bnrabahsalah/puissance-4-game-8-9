@@ -1,6 +1,5 @@
-# app.py — Backend FastAPI Puissance 4 Web
-
 import os
+import sys
 import json
 import secrets
 import re as _re
@@ -16,13 +15,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Charger .env local si présent
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(BASE_DIR)
+
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
+
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# ===== IA =====
-# Si ia_engine.py est dans le même dossier, ceci suffit.
-# Sinon adapte le chemin/import selon ton projet.
 from ia_engine import (
     best_move,
     check_win_cells,
@@ -39,6 +39,7 @@ from ia_engine import (
 # ══════════════════════════════════════════════════════════════
 # DB
 # ══════════════════════════════════════════════════════════════
+
 
 def db_conn():
     url = os.environ.get("DATABASE_URL")
@@ -116,6 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_online_moves_game_id ON online_moves(game_id);
 
 
 def init_db():
+    if not os.environ.get("DATABASE_URL"):
+        print("DATABASE_URL manquante, init_db ignoré")
+        return
+
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(INIT_SQL)
@@ -139,7 +144,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup():
-    init_db()
+    if os.environ.get("DATABASE_URL"):
+        init_db()
+        print("Base de données initialisée")
+    else:
+        print("DATABASE_URL absente : démarrage sans base de données")
 
 
 @app.get("/api/health")
@@ -150,6 +159,7 @@ def health():
 # ══════════════════════════════════════════════════════════════
 # IA
 # ══════════════════════════════════════════════════════════════
+
 
 class AIMoveReq(BaseModel):
     board: List[List[str]]
@@ -183,6 +193,7 @@ def ai_reload():
 # ══════════════════════════════════════════════════════════════
 # SAVED GAMES
 # ══════════════════════════════════════════════════════════════
+
 
 class SaveReq(BaseModel):
     save_name: Optional[str] = None
@@ -365,7 +376,9 @@ def game_position(req: dict):
     rows = g["rows_count"]
     cols = g["cols_count"]
     start = g["starting_color"]
-    moves = g["moves"] if isinstance(g["moves"], list) else json.loads(g["moves"] or "[]")
+    moves = (
+        g["moves"] if isinstance(g["moves"], list) else json.loads(g["moves"] or "[]")
+    )
 
     vi = max(0, min(int(view_index), len(moves)))
     board = [[EMPTY] * cols for _ in range(rows)]
@@ -409,6 +422,7 @@ def game_position(req: dict):
 # BGA IMPORT
 # ══════════════════════════════════════════════════════════════
 
+
 class BGAReq(BaseModel):
     table_id: str
 
@@ -428,7 +442,11 @@ def bga_import(req: BGAReq):
             existing = cur.fetchone()
 
     if existing:
-        moves = existing["moves"] if isinstance(existing["moves"], list) else json.loads(existing["moves"] or "[]")
+        moves = (
+            existing["moves"]
+            if isinstance(existing["moves"], list)
+            else json.loads(existing["moves"] or "[]")
+        )
         return {
             "game_id": existing["game_id"],
             "rows": existing["rows_count"],
@@ -450,7 +468,10 @@ def bga_import(req: BGAReq):
     moves = []
     for pat in (
         _re.compile(r"place[rz]?\s+un\s+pion\s+dans\s+la\s+colonne\s+(\d+)", _re.I),
-        _re.compile(r"(?:drops?\s+(?:a\s+)?(?:piece|token|disc)\s+(?:in(?:to)?\s+)?(?:column\s+)?|column\s+)(\d+)", _re.I),
+        _re.compile(
+            r"(?:drops?\s+(?:a\s+)?(?:piece|token|disc)\s+(?:in(?:to)?\s+)?(?:column\s+)?|column\s+)(\d+)",
+            _re.I,
+        ),
     ):
         found = [int(m.group(1)) for m in pat.finditer(html)]
         if found:
@@ -507,6 +528,7 @@ def bga_import(req: BGAReq):
 # ══════════════════════════════════════════════════════════════
 # ONLINE MULTIPLAYER
 # ══════════════════════════════════════════════════════════════
+
 
 def _mk(rows, cols):
     return [[EMPTY] * cols for _ in range(rows)]
@@ -648,7 +670,10 @@ def online_join(req: JoinOnlineReq):
                     (g["id"],),
                 )
                 if cur.fetchone()["c"] == 2 and g["status"] == "waiting":
-                    cur.execute("UPDATE online_games SET status='playing' WHERE id=%s", (g["id"],))
+                    cur.execute(
+                        "UPDATE online_games SET status='playing' WHERE id=%s",
+                        (g["id"],),
+                    )
 
         conn.commit()
 
