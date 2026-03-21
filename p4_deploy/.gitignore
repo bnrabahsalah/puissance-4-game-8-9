@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+donnees/
+base_de_donnees/*.backup

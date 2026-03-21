@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: puissance4
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: puissance4-db
+          property: connectionString
+
+databases:
+  - name: puissance4-db
+    databaseName: puissance4
+    user: puissance4
+    plan: free
+    region: frankfurt
