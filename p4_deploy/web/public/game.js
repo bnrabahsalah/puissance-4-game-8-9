@@ -21,7 +21,177 @@ class Connect4Web {
   LS_ONLINE_SECRET = "c4_online_secret";
   LS_ONLINE_TOKEN = "c4_online_token";
   LS_ONLINE_NAME = "c4_online_name";
+  showDbLoadDialog(list) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.background = "rgba(0,0,0,0.55)";
+      overlay.style.display = "flex";
+      overlay.style.alignItems = "center";
+      overlay.style.justifyContent = "center";
+      overlay.style.zIndex = "99999";
 
+      const modal = document.createElement("div");
+      modal.style.width = "min(760px, 92vw)";
+      modal.style.maxHeight = "80vh";
+      modal.style.overflow = "hidden";
+      modal.style.background = "#1c1338";
+      modal.style.border = "1px solid rgba(255,255,255,0.12)";
+      modal.style.borderRadius = "16px";
+      modal.style.boxShadow = "0 20px 60px rgba(0,0,0,0.45)";
+      modal.style.color = "#fff";
+      modal.style.padding = "18px";
+      modal.style.fontFamily = "DM Sans, Arial, sans-serif";
+
+      const title = document.createElement("div");
+      title.textContent = "Charger une partie depuis la base";
+      title.style.fontSize = "22px";
+      title.style.fontWeight = "700";
+      title.style.marginBottom = "12px";
+
+      const search = document.createElement("input");
+      search.type = "text";
+      search.placeholder = "Rechercher par ID, nom, joueurs, mode, taille...";
+      search.style.width = "100%";
+      search.style.padding = "12px 14px";
+      search.style.borderRadius = "10px";
+      search.style.border = "1px solid rgba(255,255,255,0.15)";
+      search.style.background = "#120b29";
+      search.style.color = "#fff";
+      search.style.outline = "none";
+      search.style.marginBottom = "12px";
+
+      const select = document.createElement("select");
+      select.size = 12;
+      select.style.width = "100%";
+      select.style.padding = "10px";
+      select.style.borderRadius = "10px";
+      select.style.border = "1px solid rgba(255,255,255,0.15)";
+      select.style.background = "#120b29";
+      select.style.color = "#fff";
+      select.style.marginBottom = "14px";
+
+      const footer = document.createElement("div");
+      footer.style.display = "flex";
+      footer.style.justifyContent = "flex-end";
+      footer.style.gap = "10px";
+
+      const btnCancel = document.createElement("button");
+      btnCancel.type = "button";
+      btnCancel.textContent = "Annuler";
+      btnCancel.style.padding = "10px 16px";
+      btnCancel.style.borderRadius = "10px";
+      btnCancel.style.border = "1px solid rgba(255,255,255,0.15)";
+      btnCancel.style.background = "#2a214a";
+      btnCancel.style.color = "#fff";
+      btnCancel.style.cursor = "pointer";
+
+      const btnLoad = document.createElement("button");
+      btnLoad.type = "button";
+      btnLoad.textContent = "Charger";
+      btnLoad.style.padding = "10px 16px";
+      btnLoad.style.borderRadius = "10px";
+      btnLoad.style.border = "none";
+      btnLoad.style.background = "#0ea5e9";
+      btnLoad.style.color = "#fff";
+      btnLoad.style.fontWeight = "700";
+      btnLoad.style.cursor = "pointer";
+
+      const normalizeGame = (g) => {
+        const id = g.game_id ?? g.id ?? "";
+        const saveName = g.save_name || "(sans nom)";
+        const size = `${g.rows_count ?? "?"}x${g.cols_count ?? "?"}`;
+        const modeMap = { 0: "IA vs IA", 1: "Humain vs IA", 2: "Humain vs Humain" };
+        const mode = modeMap[g.game_mode] ?? `mode=${g.game_mode ?? "?"}`;
+        const ai = `${g.ai_mode ?? "?"}/${g.ai_depth ?? "?"}`;
+        const totalMoves = g.total_moves ?? (Array.isArray(g.moves) ? g.moves.length : "?");
+        const red = g.player_red || "Rouge";
+        const yellow = g.player_yellow || "Jaune";
+        const created = g.created_at ? new Date(g.created_at).toLocaleString() : "";
+
+        return {
+          raw: g,
+          id,
+          label: `#${id} | ${saveName} | ${size} | ${mode} | ${ai} | coups=${totalMoves} | ${red} vs ${yellow} | ${created}`,
+          haystack: `${id} ${saveName} ${size} ${mode} ${ai} ${totalMoves} ${red} ${yellow} ${created}`.toLowerCase(),
+        };
+      };
+
+      const normalized = list.map(normalizeGame);
+
+      const renderOptions = (query = "") => {
+        const q = query.trim().toLowerCase();
+        const filtered = q
+          ? normalized.filter((x) => x.haystack.includes(q))
+          : normalized;
+
+        select.innerHTML = "";
+
+        for (const item of filtered) {
+          const opt = document.createElement("option");
+          opt.value = String(item.id);
+          opt.textContent = item.label;
+          select.appendChild(opt);
+        }
+
+        if (select.options.length > 0) {
+          select.selectedIndex = 0;
+        }
+      };
+
+      const close = (value = null) => {
+        overlay.remove();
+        resolve(value);
+      };
+
+      search.addEventListener("input", () => renderOptions(search.value));
+
+      btnCancel.addEventListener("click", () => close(null));
+
+      btnLoad.addEventListener("click", () => {
+        const val = select.value ? parseInt(select.value, 10) : null;
+        if (!val) return;
+        close(val);
+      });
+
+      select.addEventListener("dblclick", () => {
+        const val = select.value ? parseInt(select.value, 10) : null;
+        if (!val) return;
+        close(val);
+      });
+
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close(null);
+      });
+
+      document.addEventListener(
+        "keydown",
+        function escHandler(e) {
+          if (e.key === "Escape") {
+            document.removeEventListener("keydown", escHandler);
+            close(null);
+          }
+        },
+        { once: true }
+      );
+
+      renderOptions();
+
+      footer.appendChild(btnCancel);
+      footer.appendChild(btnLoad);
+
+      modal.appendChild(title);
+      modal.appendChild(search);
+      modal.appendChild(select);
+      modal.appendChild(footer);
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      search.focus();
+    });
+  }
   constructor() {
     const cfg = this.loadConfig();
     this.rows = cfg.rows;
@@ -2048,27 +2218,16 @@ class Connect4Web {
 
     try {
       const list = await this.apiFetch("/games", { method: "GET" });
+
       if (!Array.isArray(list) || list.length === 0) {
         alert("Base vide (aucune partie).");
         return;
       }
 
-      const lines = list.slice(0, 20).map((g) => {
-        const id = g.game_id ?? g.id;
-        const name = g.save_name ?? "";
-        const size = `${g.rows_count ?? "?"}x${g.cols_count ?? "?"}`;
-        const mode = g.game_mode ?? "?";
-        const ai = `${g.ai_mode ?? "?"}(${g.ai_depth ?? "?"})`;
-        const tm = g.total_moves ?? (g.moves?.length ?? "?");
-        return `${id} | ${name} | ${size} | mode=${mode} | ${ai} | coups=${tm}`;
-      });
+      const pickedId = await this.showDbLoadDialog(list);
+      if (!pickedId) return;
 
-      const pick = prompt("Entre l'ID de la partie à charger :\n\n" + lines.join("\n"));
-      if (!pick) return;
-      const id = parseInt(pick, 10);
-      if (Number.isNaN(id)) return;
-
-      const g = await this.apiFetch(`/games/${id}`, { method: "GET" });
+      const g = await this.apiFetch(`/games/${pickedId}`, { method: "GET" });
 
       let moves = g.moves;
       if (typeof moves === "string") {
@@ -2086,7 +2245,7 @@ class Connect4Web {
         cols: Number(g.cols_count),
         starting_color: g.starting_color,
         mode: Number(g.game_mode),
-        game_index: Number(g.game_index),
+        game_index: Number(g.game_index || 1),
         moves,
         view_index: Number.isInteger(g.view_index) ? g.view_index : moves.length,
         ai_mode: g.ai_mode || "random",
@@ -2096,7 +2255,7 @@ class Connect4Web {
       };
 
       this.applyLoadedPayload(payload);
-      alert(`✅ Partie chargée depuis la base !\nID: ${id}\nNom: ${g.save_name || ""}`);
+      alert(`✅ Partie chargée depuis la base !\nID: ${pickedId}\nNom: ${g.save_name || ""}`);
 
       this.pushHistory({
         player: "system",
