@@ -7,11 +7,10 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import json
 import os
 from datetime import datetime
-import os
 from dotenv import load_dotenv
 
 import psycopg2
-import sys, os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ia_engine import *
@@ -84,6 +83,7 @@ class Connect4App(tk.Tk):
         self.ai_var = tk.StringVar(value="random")
         self.depth_var = tk.StringVar(value="4")
         self.starting_var = tk.StringVar(value=self.starting_color)
+        self.size_var = tk.StringVar(value=f"{self.rows}x{self.cols}")
         self.status_var = tk.StringVar(value="")
 
         self.col_buttons = []
@@ -97,7 +97,7 @@ class Connect4App(tk.Tk):
     def clamp_int(self, v, lo, hi, default):
         try:
             return max(lo, min(hi, int(v)))
-        except:
+        except Exception:
             return default
 
     def is_replay_view(self):
@@ -117,7 +117,7 @@ class Connect4App(tk.Tk):
     # ── config ───────────────────────────────────────────────
     def load_config(self, path=None):
         path = path or self.CONFIG_PATH
-        default = {"rows": 8, "cols": 9, "starting_color": self.RED}
+        default = {"rows": 9, "cols": 9, "starting_color": self.RED}
         if not os.path.exists(path):
             return default
         try:
@@ -125,15 +125,18 @@ class Connect4App(tk.Tk):
                 data = json.load(f)
         except Exception:
             return default
+
         rows = data.get("rows", default["rows"])
         cols = data.get("cols", default["cols"])
         start = data.get("starting_color", default["starting_color"])
+
         if not isinstance(rows, int) or not (4 <= rows <= 20):
             rows = default["rows"]
         if not isinstance(cols, int) or not (4 <= cols <= 20):
             cols = default["cols"]
         if start not in (self.RED, self.YELLOW):
             start = default["starting_color"]
+
         return {"rows": rows, "cols": cols, "starting_color": start}
 
     def save_starting_color(self):
@@ -145,6 +148,24 @@ class Connect4App(tk.Tk):
                 json.dump(cfg, f, indent=4)
             self.starting_color = new_start
             self.reset_game(new_game=False)
+
+    def save_board_size(self):
+        value = self.size_var.get()
+        try:
+            rows, cols = map(int, value.split("x"))
+        except Exception:
+            return
+
+        cfg = self.load_config()
+        cfg["rows"] = rows
+        cfg["cols"] = cols
+
+        with open(self.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=4)
+
+        self.rows = rows
+        self.cols = cols
+        self.reset_game(new_game=False)
 
     # ── DB ───────────────────────────────────────────────────
     def db_connect(self):
@@ -166,7 +187,7 @@ class Connect4App(tk.Tk):
             ai_depth INTEGER NOT NULL DEFAULT 4,
             save_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
-        ALTER TABLE saved_games ADD COLUMN IF NOT EXISTS confidence   INTEGER NOT NULL DEFAULT 1 CHECK (confidence BETWEEN 0 AND 5);
+        ALTER TABLE saved_games ADD COLUMN IF NOT EXISTS confidence INTEGER NOT NULL DEFAULT 1 CHECK (confidence BETWEEN 0 AND 5);
         ALTER TABLE saved_games ADD COLUMN IF NOT EXISTS distinct_cols INTEGER NOT NULL DEFAULT 0 CHECK (distinct_cols BETWEEN 0 AND 20);
         """
         with self.db_connect() as conn:
@@ -177,10 +198,11 @@ class Connect4App(tk.Tk):
     def compute_confidence(self, mode, ai_mode, ai_depth):
         try:
             mode = int(mode)
-        except:
+        except Exception:
             mode = 2
         ai_mode = (ai_mode or "random").lower()
         ai_depth = self.clamp_int(ai_depth, 1, 8, 4)
+
         if mode == 2:
             return 5
         if ai_mode == "lose":
@@ -208,7 +230,6 @@ class Connect4App(tk.Tk):
         moves_canon = self.canonical_moves(self.moves)
         distinct_cols = len(set(moves_canon)) if moves_canon else 0
 
-        # check doublon
         with self.db_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -225,6 +246,7 @@ class Connect4App(tk.Tk):
             )
             if not ok:
                 return None, "cancel"
+
             with self.db_connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -326,10 +348,12 @@ class Connect4App(tk.Tk):
         pos = self.drop_token(self.board, col, token)
         if pos is None:
             return True
+
         if self.view_index < len(self.moves):
             del self.moves[self.view_index :]
         self.moves.append(col)
         self.view_index = len(self.moves)
+
         r, c = pos
         cells = check_win_cells(self.board, r, c, token)
         if cells:
@@ -338,12 +362,14 @@ class Connect4App(tk.Tk):
             self.winner = token
             self._after_state_change(trigger_robot=False)
             return False
+
         if self.is_draw_local():
             self.winning_cells = []
             self.game_over = True
             self.winner = None
             self._after_state_change(trigger_robot=False)
             return False
+
         self.current = other(self.current)
         self._after_state_change(trigger_robot=True)
         return True
@@ -354,8 +380,6 @@ class Connect4App(tk.Tk):
         mode = int(self.mode_var.get())
         if not self.is_human_turn(mode, self.current):
             return
-        # play_move appelle _after_state_change(trigger_robot=True)
-        # qui schedule déjà robot_step — ne pas l'appeler une 2e fois ici
         self.play_move(col, self.current)
 
     def on_canvas_click(self, event):
@@ -364,14 +388,17 @@ class Connect4App(tk.Tk):
         mode = int(self.mode_var.get())
         if not self.is_human_turn(mode, self.current):
             return
+
         W = self.canvas.winfo_width()
         H = self.canvas.winfo_height()
         cell = min(W / self.cols, H / self.rows)
         board_w = cell * self.cols
         x0 = (W - board_w) / 2
         x = event.x - x0
+
         if x < 0 or x >= board_w:
             return
+
         col = int(x // cell)
         if 0 <= col < self.cols:
             self.on_click(col)
@@ -380,10 +407,12 @@ class Connect4App(tk.Tk):
     def robot_step(self):
         if self.game_over or self.is_replay_view():
             return
+
         mode = int(self.mode_var.get())
         if self.is_human_turn(mode, self.current):
             self.set_buttons_state(True)
             return
+
         self.set_buttons_state(False)
         ai_mode = self.ai_var.get()
         depth = self.clamp_int(self.depth_var.get(), 1, 8, 4)
@@ -395,23 +424,24 @@ class Connect4App(tk.Tk):
                 self.game_over = True
                 self._after_state_change(trigger_robot=False)
                 return
+
             cont = self.play_move(col, self.current)
             if not cont:
                 return
+
             if mode == 0 and not self.game_over:
                 self.after(250, self.robot_step)
             else:
                 self.set_buttons_state(True)
         else:
-            # minimax ou trained — async pour ne pas geler l'UI
             self.robot_play_async(depth, ai_mode)
 
     def robot_play_async(self, depth, ai_mode):
         if self.game_over or self.is_replay_view():
             return
-        # Vérifier qu'un calcul n'est pas déjà en cours
         if self.robot_thinking:
             return
+
         self.robot_thinking = True
         self.update_status()
         self.set_buttons_state(False)
@@ -421,7 +451,6 @@ class Connect4App(tk.Tk):
         mode = int(self.mode_var.get())
 
         def compute():
-            # Tourne dans after() pour ne pas geler l'UI
             if self.game_over or self.is_replay_view():
                 self.robot_thinking = False
                 self.update_status()
@@ -430,7 +459,6 @@ class Connect4App(tk.Tk):
             result = best_move(board_copy, player, depth, ai_mode)
             best_col = result["col"]
 
-            # Afficher les scores sous les colonnes
             for c, v in result.get("scores", {}).items():
                 if c < len(self.score_labels):
                     disp = "✓" if v > 900000 else ("✗" if v < -900000 else str(int(v)))
@@ -443,11 +471,8 @@ class Connect4App(tk.Tk):
                 self.set_buttons_state(True)
                 return
 
-            # Jouer le coup — play_move gère _after_state_change
-            # NE PAS appeler robot_step ici, _after_state_change le fera
             self.play_move(best_col, player)
 
-            # Mode IA vs IA : relancer après un délai
             if mode == 0 and not self.game_over:
                 self.pending_after = self.after(300, self.robot_step)
 
@@ -458,6 +483,7 @@ class Connect4App(tk.Tk):
             return
         if self.robot_thinking or self.board is None:
             return
+
         depth = self.clamp_int(self.depth_var.get(), 1, 8, 4)
         grid0 = copy_grid(self.board)
         player = self.current
@@ -473,6 +499,7 @@ class Connect4App(tk.Tk):
                 return
             if i >= self.cols:
                 return
+
             c = i
             if c not in valids:
                 self.score_labels[c].set("N/A")
@@ -483,6 +510,7 @@ class Connect4App(tk.Tk):
                 drop_in_grid(g2, c, player)
                 val = minimax(g2, depth - 1, -(10**18), 10**18, False, player)
                 self.score_labels[c].set(str(int(val)))
+
             self.pending_after = self.after(40, lambda: step(i + 1))
 
         step(0)
@@ -491,6 +519,7 @@ class Connect4App(tk.Tk):
     def draw_board(self):
         if self.board is None:
             return
+
         self.canvas.delete("all")
         W = max(300, self.canvas.winfo_width())
         H = max(300, self.canvas.winfo_height())
@@ -500,9 +529,11 @@ class Connect4App(tk.Tk):
         bh = cell * self.rows
         x0 = (W - bw) / 2
         y0 = (H - bh) / 2
+
         self.canvas.create_rectangle(
             x0, y0, x0 + bw, y0 + bh, fill=self.COLOR_BG, outline=""
         )
+
         win_set = set(map(tuple, self.winning_cells))
         for r in range(self.rows):
             for c in range(self.cols):
@@ -518,6 +549,7 @@ class Connect4App(tk.Tk):
                 )
                 outline = self.COLOR_WIN if (r, c) in win_set else ""
                 width = 4 if (r, c) in win_set else 1
+
                 self.canvas.create_oval(
                     cx0, cy0, cx1, cy1, fill=fill, outline=outline, width=width
                 )
@@ -528,6 +560,7 @@ class Connect4App(tk.Tk):
             if self.is_replay_view()
             else ""
         )
+
         if self.game_over:
             if self.winner == self.RED:
                 msg = f"Partie #{self.game_index} — 🎉 Rouge gagne"
@@ -538,8 +571,10 @@ class Connect4App(tk.Tk):
         else:
             name = "Rouge" if self.current == self.RED else "Jaune"
             msg = f"Partie #{self.game_index} — À jouer : {name}"
+
         if self.robot_thinking:
             msg += "   (IA réfléchit…)"
+
         self.status_var.set(msg + replay)
 
     def set_buttons_state(self, enabled):
@@ -552,16 +587,20 @@ class Connect4App(tk.Tk):
         self.update_status()
         self.render_ai_scores()
         self._sync_timeline_ui()
+
         if self.is_replay_view():
             self.set_buttons_state(False)
             return
+
         if self.game_over:
             self.set_buttons_state(False)
             return
+
         mode = int(self.mode_var.get())
         self.set_buttons_state(
             (not self.robot_thinking) and self.is_human_turn(mode, self.current)
         )
+
         if trigger_robot and not self.robot_thinking and not self.game_over:
             if not self.is_human_turn(mode, self.current):
                 self.after(120, self.robot_step)
@@ -577,14 +616,12 @@ class Connect4App(tk.Tk):
             pass
 
     def _timeline_prev(self):
-        self.set_view_index(self.view_index - 1) if self.view_index > 0 else None
+        if self.view_index > 0:
+            self.set_view_index(self.view_index - 1)
 
     def _timeline_next(self):
-        (
+        if self.view_index < len(self.moves):
             self.set_view_index(self.view_index + 1)
-            if self.view_index < len(self.moves)
-            else None
-        )
 
     def _timeline_end(self):
         self.set_view_index(len(self.moves))
@@ -601,21 +638,26 @@ class Connect4App(tk.Tk):
         if self.pending_after:
             try:
                 self.after_cancel(self.pending_after)
-            except:
+            except Exception:
                 pass
             self.pending_after = None
+
         self.robot_thinking = False
         self.view_index = max(0, min(len(self.moves), int(idx)))
         self.board = self.create_board()
         self.winning_cells = []
         self.game_over = False
         self.winner = None
-        last_pos = last_token = None
+
+        last_pos = None
+        last_token = None
         for i in range(self.view_index):
             token = self.token_for_move_index(i)
             last_token = token
             last_pos = self.drop_token(self.board, self.moves[i], token)
+
         self.current = self.token_for_move_index(self.view_index)
+
         if self.view_index == len(self.moves) and last_pos and last_token:
             rr, cc = last_pos
             cells = check_win_cells(self.board, rr, cc, last_token)
@@ -625,6 +667,7 @@ class Connect4App(tk.Tk):
                 self.winner = last_token
             elif self.is_draw_local():
                 self.game_over = True
+
         self._after_state_change(trigger_robot=False)
 
     # ── reset ────────────────────────────────────────────────
@@ -632,9 +675,10 @@ class Connect4App(tk.Tk):
         if self.pending_after:
             try:
                 self.after_cancel(self.pending_after)
-            except:
+            except Exception:
                 pass
             self.pending_after = None
+
         self.game_over = True
         self.robot_thinking = False
         self.winner = None
@@ -645,16 +689,21 @@ class Connect4App(tk.Tk):
         if self.pending_after:
             try:
                 self.after_cancel(self.pending_after)
-            except:
+            except Exception:
                 pass
             self.pending_after = None
+
         self.robot_thinking = False
         cfg = self.load_config()
         self.rows = cfg["rows"]
         self.cols = cfg["cols"]
         self.starting_color = cfg["starting_color"]
+        self.size_var.set(f"{self.rows}x{self.cols}")
+        self.starting_var.set(self.starting_color)
+
         if new_game:
             self.game_index += 1
+
         self.board = self.create_board()
         self.current = self.starting_color
         self.game_over = False
@@ -669,12 +718,16 @@ class Connect4App(tk.Tk):
     def rebuild_column_widgets(self):
         for w in self.btn_frame.winfo_children():
             w.destroy()
+
         self.col_buttons = []
         self.score_labels = []
+
         row_btn = ttk.Frame(self.btn_frame)
         row_btn.pack()
+
         row_scores = ttk.Frame(self.btn_frame)
         row_scores.pack()
+
         for c in range(self.cols):
             b = ttk.Button(
                 row_btn,
@@ -684,7 +737,8 @@ class Connect4App(tk.Tk):
             )
             b.pack(side=tk.LEFT, padx=3, pady=2)
             self.col_buttons.append(b)
-        for c in range(self.cols):
+
+        for _ in range(self.cols):
             v = tk.StringVar(value="")
             ttk.Label(row_scores, textvariable=v, width=7, anchor="center").pack(
                 side=tk.LEFT, padx=3
@@ -738,12 +792,22 @@ class Connect4App(tk.Tk):
         sc.pack(side=tk.LEFT, padx=(6, 14))
         sc.bind("<<ComboboxSelected>>", lambda e: self.save_starting_color())
 
+        ttk.Label(top, text="Taille:").pack(side=tk.LEFT)
+        size_cb = ttk.Combobox(
+            top,
+            textvariable=self.size_var,
+            values=["6x7", "8x9", "9x9", "10x10"],
+            width=6,
+            state="readonly",
+        )
+        size_cb.pack(side=tk.LEFT, padx=(6, 14))
+        size_cb.bind("<<ComboboxSelected>>", lambda e: self.save_board_size())
+
         ttk.Button(
             top, text="Nouvelle partie", command=lambda: self.reset_game(True)
         ).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Stop", command=self.stop_game).pack(side=tk.LEFT, padx=6)
 
-        # Bouton recharger modèle IA
         ttk.Button(top, text="🔄 Recharger IA", command=self._reload_ia).pack(
             side=tk.LEFT, padx=6
         )
@@ -770,10 +834,12 @@ class Connect4App(tk.Tk):
         tl.pack(side=tk.TOP, fill=tk.X)
         self.tl_label_var = tk.StringVar(value="Coups: 0/0")
         ttk.Label(tl, textvariable=self.tl_label_var).pack(side=tk.LEFT)
+
         self.timeline_scale = ttk.Scale(
             tl, from_=0, to=0, orient="horizontal", command=self._on_timeline_scale
         )
         self.timeline_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+
         ttk.Button(tl, text="⏮", width=3, command=self._timeline_prev).pack(
             side=tk.LEFT, padx=(0, 4)
         )
@@ -786,10 +852,13 @@ class Connect4App(tk.Tk):
 
         body = ttk.Frame(self, padding=10)
         body.pack(fill=tk.BOTH, expand=True)
+
         left = ttk.Frame(body)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         self.btn_frame = ttk.Frame(left)
         self.btn_frame.pack(fill=tk.X)
+
         self.canvas = tk.Canvas(left, bg="white", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         self.canvas.bind("<Configure>", lambda e: self.draw_board())
@@ -818,6 +887,7 @@ class Connect4App(tk.Tk):
         name = self.ask_save_name()
         if not name:
             return
+
         try:
             gid, action = self.upsert_game_to_postgres(name)
             if action == "cancel":
@@ -833,6 +903,7 @@ class Connect4App(tk.Tk):
         name = self.ask_save_name()
         if not name:
             return
+
         data = {
             "save_name": name,
             "rows": self.rows,
@@ -845,6 +916,7 @@ class Connect4App(tk.Tk):
             "ai_mode": self.ai_var.get(),
             "ai_depth": self.clamp_int(self.depth_var.get(), 1, 8, 4),
         }
+
         path = filedialog.asksaveasfilename(
             defaultextension=".json",
             initialfile=f"{name}.json",
@@ -852,8 +924,10 @@ class Connect4App(tk.Tk):
         )
         if not path:
             return
+
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
         messagebox.showinfo("Sauvegarde", "✅ Fichier JSON sauvegardé")
 
     def load_game_json_flow(self):
@@ -873,6 +947,7 @@ class Connect4App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Erreur", str(e))
             return
+
         if not games:
             messagebox.showinfo("Base vide", "Aucune partie sauvegardée.")
             return
@@ -882,6 +957,7 @@ class Connect4App(tk.Tk):
         win.geometry("900x420")
         win.transient(self)
         win.grab_set()
+
         cols = (
             "ID",
             "Nom",
@@ -893,10 +969,12 @@ class Connect4App(tk.Tk):
             "Coups",
             "Date",
         )
+
         tree = ttk.Treeview(win, columns=cols, show="headings", height=14)
         for col in cols:
             tree.heading(col, text=col)
             tree.column(col, width=90)
+
         for g in games:
             gid, name, r, c, mode, ai_mode, ai_depth, conf, cols_used, nb, date = g
             date_str = (
@@ -920,6 +998,7 @@ class Connect4App(tk.Tk):
                     date_str,
                 ),
             )
+
         tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         def do_load():
@@ -927,10 +1006,12 @@ class Connect4App(tk.Tk):
             if not sel:
                 messagebox.showwarning("Sélection", "Sélectionne une partie.")
                 return
+
             gid = int(tree.item(sel[0])["values"][0])
             data = self.fetch_saved_game_by_id(gid)
             if not data:
                 return
+
             moves_raw = data[7]
             payload = {
                 "save_name": data[1],
@@ -960,15 +1041,17 @@ class Connect4App(tk.Tk):
         if self.pending_after:
             try:
                 self.after_cancel(self.pending_after)
-            except:
+            except Exception:
                 pass
             self.pending_after = None
+
         self.robot_thinking = False
         rows = data.get("rows")
         cols = data.get("cols")
         start = data.get("starting_color")
         moves = data.get("moves", [])
         vi = data.get("view_index", 0)
+
         if not isinstance(rows, int) or not (4 <= rows <= 20):
             return messagebox.showerror("Erreur", "rows invalide")
         if not isinstance(cols, int) or not (4 <= cols <= 20):
@@ -979,9 +1062,12 @@ class Connect4App(tk.Tk):
             return messagebox.showerror("Erreur", "moves invalide")
         if not isinstance(vi, int) or not (0 <= vi <= len(moves)):
             vi = len(moves)
+
         self.rows = rows
         self.cols = cols
         self.starting_color = start
+        self.size_var.set(f"{self.rows}x{self.cols}")
+        self.starting_var.set(self.starting_color)
         self.mode_var.set(str(int(data.get("mode", 2))))
         self.game_index = int(data.get("game_index", 1))
         self.ai_var.set(data.get("ai_mode", "random"))
@@ -992,11 +1078,14 @@ class Connect4App(tk.Tk):
         self.winning_cells = []
         self.game_over = False
         self.winner = None
-        last_pos = last_token = None
+
+        last_pos = None
+        last_token = None
         for i in range(vi):
             token = self.token_for_move_index(i)
             last_token = token
             last_pos = self.drop_token(self.board, moves[i], token)
+
         self.current = self.token_for_move_index(vi)
         if vi == len(moves) and last_pos and last_token:
             rr, cc = last_pos
@@ -1007,6 +1096,7 @@ class Connect4App(tk.Tk):
                 self.winner = last_token
             elif self.is_draw_local():
                 self.game_over = True
+
         self.rebuild_column_widgets()
         self._after_state_change(trigger_robot=True)
 
