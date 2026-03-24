@@ -59,11 +59,75 @@ PROJECT_DIR = Path(__file__).resolve().parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-OUT_DIR = PROJECT_DIR / "scraped_moves"
+DONNEES_DIR = PROJECT_DIR.parent / "donnees"
+DONNEES_DIR.mkdir(exist_ok=True)
+
+OUT_DIR = DONNEES_DIR / "scraped_moves"
 OUT_DIR.mkdir(exist_ok=True)
 
-SCRAPED_TABLES_FILE = PROJECT_DIR / "scraped_tables.json"
-SCRAPED_PLAYERS_FILE = PROJECT_DIR / "scraped_players.json"
+SCRAPED_TABLES_FILE = DONNEES_DIR / "scraped_tables.json"
+SCRAPED_PLAYERS_FILE = DONNEES_DIR / "scraped_players.json"
+
+# ============================================================
+# INDEX LOCAL — dossier donnees/
+# ============================================================
+
+# sha256(moves_base0) -> filename  ; construit une seule fois au démarrage
+_DONNEES_INDEX: dict = {}
+
+
+def _sig_from_cols(cols: list) -> str:
+    payload = json.dumps(cols, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    import hashlib
+
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_donnees_index() -> None:
+    """
+    Parcourt DONNEES_DIR et indexe chaque partie par la signature sha256 de ses moves.
+    Les fichiers JSON de donnees/ contiennent {"moves": [int, ...], "rows": N, "cols": N, ...}
+    avec des colonnes déjà en base-0.
+    Appelé une fois dans main() avant le démarrage du scraping.
+    """
+    _DONNEES_INDEX.clear()
+    if not DONNEES_DIR.exists():
+        return
+
+    count = 0
+    for fpath in DONNEES_DIR.glob("*.json"):
+        try:
+            raw = read_text_any_encoding(fpath)
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        if not isinstance(data, dict):
+            continue
+
+        moves_raw = data.get("moves", [])
+        if not moves_raw or not isinstance(moves_raw, list):
+            continue
+
+        try:
+            cols_0 = [int(c) for c in moves_raw if isinstance(c, (int, float))]
+        except Exception:
+            continue
+
+        if cols_0:
+            _DONNEES_INDEX[_sig_from_cols(cols_0)] = fpath.name
+            count += 1
+
+    print(
+        f"📂 Index donnees/ : {count} parties chargées ({len(_DONNEES_INDEX)} signatures uniques)"
+    )
+
+
+def is_in_donnees(cols_0: list) -> bool:
+    """Retourne True si cette séquence de coups existe déjà dans donnees/."""
+    return bool(cols_0) and _sig_from_cols(cols_0) in _DONNEES_INDEX
 
 
 # ============================================================
@@ -746,6 +810,20 @@ def scrape_single_table(driver, tid, pseudo, scraped_data):
 
     rows, cols = size
 
+    # ── Vérification doublon dans donnees/ ────────────────────────────────
+    cols_raw = [int(m["col"]) for m in moves if isinstance(m, dict) and "col" in m]
+    mn, mx = (min(cols_raw), max(cols_raw)) if cols_raw else (0, 0)
+    cols_0 = (
+        [c - 1 for c in cols_raw] if (cols_raw and mn >= 1 and mx <= cols) else cols_raw
+    )
+
+    if is_in_donnees(cols_0):
+        print(f"⏭️  [{tid}] doublon donnees/, skip")
+        mark_scraped(scraped_data, tid)
+        save_scraped_tables(scraped_data)
+        return "duplicate"
+    # ─────────────────────────────────────────────────────────────────────
+
     safe_pseudo = re.sub(r'[\\/:*?"<>|]+', "_", pseudo).strip() or "unknown"
     out_path = OUT_DIR / f"moves_{safe_pseudo}_{tid}.json"
 
@@ -955,9 +1033,87 @@ def scrape_player_tables_incremental(driver, player_id, pseudo, scraped_data):
 # ============================================================
 
 
+def import_existing_unimported_tables(scraped_data):
+    """Importe les tables qui sont dans scraped_moves/ mais pas encore dans imported."""
+    if not BGA_IMPORT_OK:
+        print("⚠️ Import DB indisponible, skipping existing imports")
+        return 0
+
+    imported_count = 0
+    skipped_not_dict = 0
+    skipped_no_table_id = 0
+    skipped_not_scraped = 0
+    skipped_already_imported = 0
+    errors = 0
+
+    for fpath in OUT_DIR.glob("moves_*.json"):
+        try:
+            raw = read_text_any_encoding(fpath)
+            data = json.loads(raw)
+        except Exception as e:
+            errors += 1
+            continue
+
+        if not isinstance(data, dict):
+            skipped_not_dict += 1
+            continue
+
+        table_id = data.get("table_id")
+        if not table_id:
+            skipped_no_table_id += 1
+            continue
+
+        if table_id in scraped_data["imported"]:
+            skipped_already_imported += 1
+            continue
+
+        if table_id not in scraped_data["scraped"]:
+            skipped_not_scraped += 1
+            continue
+
+        # Importer
+        moves = data.get("moves", [])
+        rows = data.get("rows", DEFAULT_ROWS_IF_UNKNOWN)
+        cols = data.get("cols", DEFAULT_COLS_IF_UNKNOWN)
+        player = data.get("player", "unknown")
+
+        try:
+            gid = import_into_db(
+                moves=moves,
+                save_name=f"BGA_{table_id}_{rows}x{cols}",
+                rows=rows,
+                cols=cols,
+            )
+            scraped_data["imported"].append(table_id)
+            save_scraped_tables(scraped_data)
+            imported_count += 1
+            print(f"✅ Importé {table_id} (id={gid})")
+        except Exception as e:
+            print(f"❌ Échec import {table_id}: {e}")
+            mark_failed(scraped_data, table_id, str(e))
+            save_scraped_tables(scraped_data)
+            errors += 1
+
+    # Afficher un résumé des skips
+    total_processed = (
+        imported_count
+        + skipped_not_dict
+        + skipped_no_table_id
+        + skipped_not_scraped
+        + skipped_already_imported
+        + errors
+    )
+    if total_processed > 0:
+        pass  # Removed print statement
+
+    return imported_count
+
+
 def main():
     scraped_data = load_scraped_tables()
     scraped_players_data = load_scraped_players()
+
+    build_donnees_index()
 
     print(f"📋 Tables déjà scrapées : {len(scraped_data['scraped'])}")
     print(f"👤 Joueurs déjà traités : {len(scraped_players_data['done'])}")
@@ -969,6 +1125,9 @@ def main():
         print("✅ Module bga_import chargé")
     else:
         print(f"⚠️ Module bga_import indisponible: {BGA_IMPORT_ERROR}")
+
+    # Importer les tables existantes non importées
+    imported_existing = import_existing_unimported_tables(scraped_data)
 
     driver = None
 

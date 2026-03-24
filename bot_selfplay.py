@@ -5,34 +5,38 @@ bot_selfplay.py
 Bot autonome : joue des parties Puissance-4 (9×9) IA vs IA
 et les insère dans la table saved_games de PostgreSQL.
 
-Utilise exactement la même logique minimax / random que game.py,
-sans aucune dépendance à Tkinter.
+Version :
+- minimax vs minimax uniquement
+- choix aléatoire parmi les meilleurs coups minimax
+- pas de symétrie canonique pour éviter trop de doublons
 
 Usage :
-    python bot_selfplay.py                  # 10 parties, paramètres par défaut
-    python bot_selfplay.py --n 50           # 50 parties
-    python bot_selfplay.py --n 20 --red minimax --red-depth 4 --yellow random
-    python bot_selfplay.py --n 5  --red minimax --red-depth 6 --yellow minimax --yellow-depth 4
-    python bot_selfplay.py --help
+    python bot_selfplay.py
+    python bot_selfplay.py --red-depth 4 --yellow-depth 4
+    python bot_selfplay.py --red-depth 6 --yellow-depth 4
+    python bot_selfplay.py --start alt
+    python bot_selfplay.py --no-skip-duplicates
 """
 
 import argparse
 import json
 import random
-import sys
-from datetime import datetime
+import os
 from typing import List, Optional, Tuple
 
 import psycopg2
+from dotenv import load_dotenv
 
-# ──────────────────────────────────────────────────────────────
-# Configuration base de données (identique à game.py)
-# ──────────────────────────────────────────────────────────────
+load_dotenv(
+    os.path.join(os.path.dirname(__file__), "..", ".env"),
+    encoding="utf-8"
+)
+
 DB_CONFIG = {
     "host": "localhost",
     "database": "puissance4_db",
     "user": "postgres",
-    "password": "1234",
+    "password": "admin123",
     "port": 5432,
 }
 
@@ -48,7 +52,7 @@ COLS = 9
 
 
 # ──────────────────────────────────────────────────────────────
-# Logique de jeu (extraite de game.py, sans Tkinter)
+# Logique de jeu
 # ──────────────────────────────────────────────────────────────
 def other(token: str) -> str:
     return YELLOW if token == RED else RED
@@ -73,10 +77,12 @@ def drop_token(
         return None
     if board[0][col] != EMPTY:
         return None
+
     for r in range(ROWS - 1, -1, -1):
         if board[r][col] == EMPTY:
             board[r][col] = token
             return (r, col)
+
     return None
 
 
@@ -88,25 +94,30 @@ def check_win_cells(
     board: List[List[str]], last_row: int, last_col: int, token: str
 ) -> List[Tuple[int, int]]:
     dirs = [(0, 1), (1, 0), (1, 1), (1, -1)]
+
     for dr, dc in dirs:
         cells = [(last_row, last_col)]
+
         r, c = last_row + dr, last_col + dc
         while 0 <= r < ROWS and 0 <= c < COLS and board[r][c] == token:
             cells.append((r, c))
             r += dr
             c += dc
+
         r, c = last_row - dr, last_col - dc
         while 0 <= r < ROWS and 0 <= c < COLS and board[r][c] == token:
             cells.insert(0, (r, c))
             r -= dr
             c -= dc
+
         if len(cells) >= CONNECT_N:
             return cells[:CONNECT_N]
+
     return []
 
 
 # ──────────────────────────────────────────────────────────────
-# Minimax (copie exacte de game.py)
+# Minimax
 # ──────────────────────────────────────────────────────────────
 def terminal_state(grid: List[List[str]]) -> Tuple[bool, Optional[str]]:
     for r in range(ROWS):
@@ -114,24 +125,30 @@ def terminal_state(grid: List[List[str]]) -> Tuple[bool, Optional[str]]:
             p = grid[r][c]
             if p == EMPTY:
                 continue
+
             if c + 3 < COLS and all(grid[r][c + i] == p for i in range(4)):
                 return True, p
+
             if r + 3 < ROWS and all(grid[r + i][c] == p for i in range(4)):
                 return True, p
+
             if (
                 r + 3 < ROWS
                 and c + 3 < COLS
                 and all(grid[r + i][c + i] == p for i in range(4))
             ):
                 return True, p
+
             if (
                 r + 3 < ROWS
                 and c + 3 < COLS
                 and all(grid[r + 3 - i][c + i] == p for i in range(4))
             ):
                 return True, p
+
     if is_draw(grid):
         return True, None
+
     return False, None
 
 
@@ -147,20 +164,24 @@ def evaluate_window(window: List[str], player: str) -> int:
         return -100000
 
     score = 0
+
     if cp == 3 and ce == 1:
         score += 50
     elif cp == 2 and ce == 2:
         score += 10
+
     if co == 3 and ce == 1:
         score -= 80
     elif co == 2 and ce == 2:
         score -= 10
+
     return score
 
 
 def heuristic_score(grid: List[List[str]], player: str) -> int:
     score = 0
     center = COLS // 2
+
     score += sum(1 for r in range(ROWS) if grid[r][center] == player) * 6
 
     for r in range(ROWS):
@@ -182,6 +203,16 @@ def heuristic_score(grid: List[List[str]], player: str) -> int:
     return score
 
 
+def _drop_in_grid(
+    grid: List[List[str]], col: int, token: str
+) -> Optional[Tuple[int, int]]:
+    for r in range(ROWS - 1, -1, -1):
+        if grid[r][col] == EMPTY:
+            grid[r][col] = token
+            return (r, col)
+    return None
+
+
 def minimax(
     grid: List[List[str]],
     depth: int,
@@ -191,12 +222,14 @@ def minimax(
     player: str,
 ) -> float:
     term, winner = terminal_state(grid)
+
     if term:
         if winner == player:
             return 1_000_000
         if winner == other(player):
             return -1_000_000
         return 0
+
     if depth == 0:
         return heuristic_score(grid, player)
 
@@ -215,32 +248,22 @@ def minimax(
             if alpha >= beta:
                 break
         return best
-    else:
-        opp = other(player)
-        best = 10**18
-        for col in moves:
-            g2 = copy_grid(grid)
-            _drop_in_grid(g2, col, opp)
-            val = minimax(g2, depth - 1, alpha, beta, True, player)
-            best = min(best, val)
-            beta = min(beta, best)
-            if alpha >= beta:
-                break
-        return best
 
-
-def _drop_in_grid(
-    grid: List[List[str]], col: int, token: str
-) -> Optional[Tuple[int, int]]:
-    for r in range(ROWS - 1, -1, -1):
-        if grid[r][col] == EMPTY:
-            grid[r][col] = token
-            return (r, col)
-    return None
+    opp = other(player)
+    best = 10**18
+    for col in moves:
+        g2 = copy_grid(grid)
+        _drop_in_grid(g2, col, opp)
+        val = minimax(g2, depth - 1, alpha, beta, True, player)
+        best = min(best, val)
+        beta = min(beta, best)
+        if alpha >= beta:
+            break
+    return best
 
 
 # ──────────────────────────────────────────────────────────────
-# Choix de coup selon l'algo
+# Choix de coup
 # ──────────────────────────────────────────────────────────────
 def choose_move(
     board: List[List[str]],
@@ -258,22 +281,28 @@ def choose_move(
     if ai_mode == "minimax":
         center = COLS // 2
         cols_sorted = sorted(cols, key=lambda c: abs(c - center))
-        best_col = cols_sorted[0]
+
         best_val = -(10**18)
+        best_cols = []
+
         for col in cols_sorted:
             g2 = copy_grid(board)
             _drop_in_grid(g2, col, current)
             val = minimax(g2, depth - 1, -(10**18), 10**18, False, current)
+
             if val > best_val:
                 best_val = val
-                best_col = col
-        return best_col
+                best_cols = [col]
+            elif val == best_val:
+                best_cols.append(col)
+
+        return random.choice(best_cols)
 
     return random.choice(cols)
 
 
 # ──────────────────────────────────────────────────────────────
-# Symétrie canonique (identique à game.py)
+# Symétrie / doublons
 # ──────────────────────────────────────────────────────────────
 def mirror_col(col: int) -> int:
     return (COLS - 1) - col
@@ -288,11 +317,12 @@ def canonical_moves(moves: List[int]) -> List[int]:
 
 
 # ──────────────────────────────────────────────────────────────
-# Calcul de la confidence (identique à game.py)
+# Confidence
 # ──────────────────────────────────────────────────────────────
 def compute_confidence(mode: int, ai_mode: str, ai_depth: int) -> int:
     ai_mode = (ai_mode or "random").lower()
     ai_depth = max(1, min(8, int(ai_depth)))
+
     if mode == 2:
         return 5
     if ai_mode == "lose":
@@ -307,6 +337,7 @@ def compute_confidence(mode: int, ai_mode: str, ai_depth: int) -> int:
         if ai_depth <= 6:
             return 4
         return 5
+
     return 1
 
 
@@ -317,13 +348,9 @@ def play_game(
     starting_color: str = RED,
     red_ai: str = "minimax",
     red_depth: int = 4,
-    yellow_ai: str = "random",
+    yellow_ai: str = "minimax",
     yellow_depth: int = 4,
 ) -> Tuple[List[int], Optional[str]]:
-    """
-    Joue une partie complète IA vs IA.
-    Retourne (liste_coups, gagnant) où gagnant ∈ {'R', 'Y', None (nul)}.
-    """
     board = create_board()
     moves: List[int] = []
     current = starting_color
@@ -331,7 +358,7 @@ def play_game(
     while True:
         cols = valid_columns(board)
         if not cols:
-            return moves, None  # nul
+            return moves, None
 
         if current == RED:
             col = choose_move(board, current, red_ai, red_depth)
@@ -350,10 +377,10 @@ def play_game(
 
         cells = check_win_cells(board, r, c, current)
         if cells:
-            return moves, current  # victoire
+            return moves, current
 
         if is_draw(board):
-            return moves, None  # nul
+            return moves, None
 
         current = other(current)
 
@@ -362,13 +389,13 @@ def play_game(
 # Base de données
 # ──────────────────────────────────────────────────────────────
 def db_connect():
+    print("DB_CONFIG =", repr(DB_CONFIG))
     conn = psycopg2.connect(**DB_CONFIG)
     conn.set_client_encoding("UTF8")
     return conn
 
 
 def ensure_table(conn):
-    """Crée saved_games si elle n'existe pas encore."""
     sql = """
     CREATE TABLE IF NOT EXISTS saved_games (
         id SERIAL PRIMARY KEY,
@@ -389,7 +416,6 @@ def ensure_table(conn):
     """
     with conn.cursor() as cur:
         cur.execute(sql)
-        # Ajout des colonnes manquantes si table déjà existante
         for col_def in [
             "ADD COLUMN IF NOT EXISTS confidence INTEGER NOT NULL DEFAULT 1 CHECK (confidence BETWEEN 0 AND 5)",
             "ADD COLUMN IF NOT EXISTS distinct_cols INTEGER NOT NULL DEFAULT 0 CHECK (distinct_cols BETWEEN 0 AND 20)",
@@ -401,15 +427,14 @@ def ensure_table(conn):
     conn.commit()
 
 
-def is_duplicate(conn, moves_canon: List[int]) -> bool:
-    """Vérifie si une partie avec les mêmes coups (canonique) existe déjà."""
+def is_duplicate(conn, moves_to_store: List[int]) -> bool:
     sql = """
     SELECT 1 FROM saved_games
     WHERE rows = %s AND cols = %s AND moves = %s::jsonb
     LIMIT 1;
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (ROWS, COLS, json.dumps(moves_canon)))
+        cur.execute(sql, (ROWS, COLS, json.dumps(moves_to_store)))
         return cur.fetchone() is not None
 
 
@@ -417,7 +442,7 @@ def insert_game(
     conn,
     save_name: str,
     starting_color: str,
-    moves_canon: List[int],
+    moves_to_store: List[int],
     ai_mode_red: str,
     ai_depth_red: int,
     ai_mode_yellow: str,
@@ -425,15 +450,9 @@ def insert_game(
     game_index: int,
     winner: Optional[str],
 ) -> int:
-    """
-    Insère la partie en base. Mode 0 = IA vs IA.
-    ai_mode et ai_depth conservés pour le joueur Rouge (premier joueur).
-    Le nom encode les deux algos pour la traçabilité.
-    """
-    moves_canon_str = json.dumps(moves_canon)
-    distinct_cols = len(set(moves_canon)) if moves_canon else 0
+    moves_str = json.dumps(moves_to_store)
+    distinct_cols = len(set(moves_to_store)) if moves_to_store else 0
 
-    # La confidence reflète le niveau global : on prend le max des deux IA
     conf_red = compute_confidence(0, ai_mode_red, ai_depth_red)
     conf_yellow = compute_confidence(0, ai_mode_yellow, ai_depth_yellow)
     confidence = max(conf_red, conf_yellow)
@@ -455,17 +474,18 @@ def insert_game(
                 ROWS,
                 COLS,
                 starting_color,
-                2,  # mode 2 = Humain vs Humain (affiché comme BGA)
+                2,
                 game_index,
-                moves_canon_str,
-                len(moves_canon),
+                moves_str,
+                len(moves_to_store),
                 "bga",
-                ai_depth_red,
+                max(ai_depth_red, ai_depth_yellow),
                 confidence,
                 distinct_cols,
             ),
         )
         new_id = cur.fetchone()[0]
+
     conn.commit()
     return int(new_id)
 
@@ -474,9 +494,7 @@ def insert_game(
 # Boucle principale
 # ──────────────────────────────────────────────────────────────
 def run_bot(
-    red_ai: str = "minimax",
     red_depth: int = 4,
-    yellow_ai: str = "random",
     yellow_depth: int = 4,
     starting_color: str = RED,
     skip_duplicates: bool = True,
@@ -488,15 +506,9 @@ def run_bot(
     stats = {"inserted": 0, "skipped": 0, "R": 0, "Y": 0, "draw": 0}
 
     if verbose:
-        print(f"\n🤖  Bot selfplay — boucle infinie (Ctrl+C pour arrêter)")
-        print(
-            f"    Rouge  : {red_ai}"
-            + (f" depth={red_depth}" if red_ai == "minimax" else "")
-        )
-        print(
-            f"    Jaune  : {yellow_ai}"
-            + (f" depth={yellow_depth}" if yellow_ai == "minimax" else "")
-        )
+        print("\n🤖  Bot selfplay — boucle infinie (Ctrl+C pour arrêter)")
+        print(f"    Rouge  : minimax depth={red_depth}")
+        print(f"    Jaune  : minimax depth={yellow_depth}")
         print(f"    Taille : {ROWS}×{COLS}  |  Départ : {starting_color}\n")
 
     i = 0
@@ -504,25 +516,14 @@ def run_bot(
         while True:
             i += 1
 
-            # Alterner la couleur de départ à chaque partie
             start = (
                 starting_color
                 if starting_color in (RED, YELLOW)
                 else (RED if i % 2 else YELLOW)
             )
 
-            # Varier aléatoirement le matchup à chaque partie :
-            # ~25% minimax vs random, ~25% random vs minimax, ~50% minimax vs minimax
-            roll = random.random()
-            if roll < 0.25:
-                cur_red_ai, cur_red_depth = red_ai, red_depth
-                cur_yellow_ai, cur_yellow_depth = yellow_ai, yellow_depth
-            elif roll < 0.5:
-                cur_red_ai, cur_red_depth = yellow_ai, yellow_depth
-                cur_yellow_ai, cur_yellow_depth = red_ai, red_depth
-            else:
-                cur_red_ai, cur_red_depth = red_ai, red_depth
-                cur_yellow_ai, cur_yellow_depth = red_ai, red_depth
+            cur_red_ai, cur_red_depth = "minimax", red_depth
+            cur_yellow_ai, cur_yellow_depth = "minimax", yellow_depth
 
             moves, winner = play_game(
                 starting_color=start,
@@ -532,9 +533,11 @@ def run_bot(
                 yellow_depth=cur_yellow_depth,
             )
 
-            moves_canon = canonical_moves(moves)
+            # On garde les coups tels quels pour éviter que les parties miroir
+            # soient considérées comme doublons
+            moves_to_store = moves
 
-            if skip_duplicates and is_duplicate(conn, moves_canon):
+            if skip_duplicates and is_duplicate(conn, moves_to_store):
                 stats["skipped"] += 1
                 if verbose:
                     print(f"  [#{i:>5}]  ⏭  doublon ignoré")
@@ -542,7 +545,6 @@ def run_bot(
 
             stats["R" if winner == RED else "Y" if winner == YELLOW else "draw"] += 1
 
-            # Nom format BGA : deux IDs aléatoires + taille
             id1 = random.randint(100_000_000, 999_999_999)
             id2 = random.randint(100_000_000, 999_999_999)
             save_name = f"BGA_{id1}_{id2}_{ROWS}x{COLS}"
@@ -551,7 +553,7 @@ def run_bot(
                 conn=conn,
                 save_name=save_name,
                 starting_color=start,
-                moves_canon=moves_canon,
+                moves_to_store=moves_to_store,
                 ai_mode_red=cur_red_ai,
                 ai_depth_red=cur_red_depth,
                 ai_mode_yellow=cur_yellow_ai,
@@ -567,15 +569,10 @@ def run_bot(
                     if winner == RED
                     else "🟡 Jaune" if winner == YELLOW else "🤝 Nul"
                 )
-                r_label = cur_red_ai + (
-                    f"({cur_red_depth})" if cur_red_ai == "minimax" else ""
-                )
-                y_label = cur_yellow_ai + (
-                    f"({cur_yellow_depth})" if cur_yellow_ai == "minimax" else ""
-                )
                 print(
-                    f"  [#{i:>5}]  ✅  id={gid:<6}  coups={len(moves_canon):<4}"
-                    f"  🔴{r_label} vs 🟡{y_label}  →  {winner_label}"
+                    f"  [#{i:>5}]  ✅  id={gid:<6}  coups={len(moves_to_store):<4}"
+                    f"  🔴minimax({cur_red_depth}) vs 🟡minimax({cur_yellow_depth})"
+                    f"  →  {winner_label}"
                 )
 
     except KeyboardInterrupt:
@@ -601,22 +598,13 @@ def run_bot(
 # ──────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Bot selfplay Puissance-4 9×9 — tourne indéfiniment, Ctrl+C pour arrêter"
+        description="Bot selfplay Puissance-4 9×9 — minimax vs minimax uniquement"
     )
     p.add_argument(
-        "--red",
-        default="minimax",
-        choices=["random", "minimax"],
-        help="Algo du joueur Rouge (défaut: minimax)",
-    )
-    p.add_argument(
-        "--red-depth", type=int, default=4, help="Profondeur minimax Rouge (défaut: 4)"
-    )
-    p.add_argument(
-        "--yellow",
-        default="random",
-        choices=["random", "minimax"],
-        help="Algo du joueur Jaune (défaut: random)",
+        "--red-depth",
+        type=int,
+        default=4,
+        help="Profondeur minimax Rouge (défaut: 4)",
     )
     p.add_argument(
         "--yellow-depth",
@@ -644,9 +632,7 @@ if __name__ == "__main__":
     starting = args.start if args.start in (RED, YELLOW) else RED
 
     run_bot(
-        red_ai=args.red,
         red_depth=args.red_depth,
-        yellow_ai=args.yellow,
         yellow_depth=args.yellow_depth,
         starting_color=starting,
         skip_duplicates=not args.no_skip_duplicates,
