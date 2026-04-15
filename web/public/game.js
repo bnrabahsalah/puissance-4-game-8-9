@@ -4,12 +4,12 @@ class Connect4Web {
   YELLOW = "Y";
   CONNECT_N = 4;
 
-COLOR_BG = "#2f1252";
-COLOR_HOLE = "#fef3c7";
-COLOR_RED = "#ff4d6d";
-COLOR_YELLOW = "#facc15";
-COLOR_WIN = "#22c55e";
-COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
+  COLOR_BG = "#2f1252";
+  COLOR_HOLE = "#fef3c7";
+  COLOR_RED = "#ff4d6d";
+  COLOR_YELLOW = "#facc15";
+  COLOR_WIN = "#22c55e";
+  COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
   LS_NAME_R = "c4_name_red";
   LS_NAME_Y = "c4_name_yellow";
   LS_HISTORY = "c4_history";
@@ -63,6 +63,9 @@ COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
     this.lastDrawGeom = null;
     this.hoverCol = null;
     this.predictionReqId = 0;
+    this._predictionAbortController = null;
+    this._predictionTimer = null;
+    this._predictionCacheKey = "";
     this._minimaxDeadline = null;
     this._localTT = new Map();
     this._localHistory = new Map();
@@ -209,24 +212,24 @@ COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
   }
 
   inferCurrentPlayerFromBoard() {
-  if (!this.board) return this.startingColor;
+    if (!this.board) return this.startingColor;
 
-  let red = 0;
-  let yellow = 0;
+    let red = 0;
+    let yellow = 0;
 
-  for (let r = 0; r < this.rows; r++) {
-    for (let c = 0; c < this.cols; c++) {
-      if (this.board[r][c] === this.RED) red++;
-      else if (this.board[r][c] === this.YELLOW) yellow++;
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        if (this.board[r][c] === this.RED) red++;
+        else if (this.board[r][c] === this.YELLOW) yellow++;
+      }
     }
+
+    const total = red + yellow;
+
+    return total % 2 === 0
+      ? this.startingColor
+      : this.other(this.startingColor);
   }
-
-  const total = red + yellow;
-
-  return total % 2 === 0
-    ? this.startingColor
-    : this.other(this.startingColor);
-}
   detectWinnerOnBoard() {
     for (let r = 0; r < this.rows; r++) {
       for (let c = 0; c < this.cols; c++) {
@@ -397,7 +400,7 @@ COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
             depth: String(body.depth || 4),
           });
           return await this.apiFetch(`/ai/move?${params.toString()}`, { method: "GET" });
-        } catch {}
+        } catch { }
       }
 
       const msg =
@@ -411,11 +414,7 @@ COLOR_HOVER_COL = "rgba(250,204,21,0.16)";
     return payload;
   }
 
-async requestPrediction(payload) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 9000);
-
-  try {
+  async requestPrediction(payload, signal = null) {
     const params = new URLSearchParams({
       board: JSON.stringify(payload.board || []),
       player: String(payload.player || "R"),
@@ -424,18 +423,26 @@ async requestPrediction(payload) {
 
     return await this.apiFetch(`/predict?${params.toString()}`, {
       method: "GET",
-      signal: controller.signal,
+      signal,
     });
-  } finally {
-    clearTimeout(timeoutId);
   }
-}
-
+  async requestAiMove(payload, signal = null) {
+    return await this.apiFetch("/ai/move", {
+      method: "POST",
+      body: JSON.stringify({
+        board: payload.board || [],
+        player: String(payload.player || "R"),
+        ai_mode: String(payload.ai_mode || "minimax"),
+        depth: String(payload.depth || 4),
+      }),
+      signal,
+    });
+  }
   cleanJoinUrl() {
     try {
       const cleanUrl = `${location.origin}${location.pathname}`;
       window.history.replaceState({}, "", cleanUrl);
-    } catch {}
+    } catch { }
   }
 
   other(t) {
@@ -667,102 +674,265 @@ async requestPrediction(payload) {
     }
     return undefined;
   }
-
-async updatePrediction() {
-  if (!this.el.predictionText) return;
-
-  if (!this.board) {
-    this.setPredictionText("Prédiction : ...");
-    return;
-  }
-
-  if (this.gameOver) {
-    if (this.winner === this.RED) {
-      this.setPredictionText("Partie terminée : Rouge a gagné");
-    } else if (this.winner === this.YELLOW) {
-      this.setPredictionText("Partie terminée : Jaune a gagné");
-    } else {
-      this.setPredictionText("Partie terminée : match nul");
+  localPredictPosition(board, player, maxDepth = 8, timeLimitMs = 1200) {
+    if (!board) {
+      return {
+        winner: null,
+        best_col: null,
+        score: 0,
+        exact: false,
+        mateIn: null,
+        moves: null,
+      };
     }
-    return;
+
+    const terminal = this.terminalState(board);
+    if (terminal.over) {
+      return {
+        winner: terminal.winner,
+        best_col: null,
+        score:
+          terminal.winner === player
+            ? 1000000000
+            : terminal.winner === null
+              ? 0
+              : -1000000000,
+        exact: true,
+        mateIn: 0,
+        moves: 0,
+      };
+    }
+
+    const best = this.runLocalBestMove(this.copyGrid(board), player, maxDepth, timeLimitMs);
+    const score = Number.isFinite(best?.score) ? Number(best.score) : 0;
+
+    let winner = null;
+    if (score > 900000) winner = player;
+    else if (score < -900000) winner = this.other(player);
+
+    const mateIn =
+      best?.distance !== null &&
+        best?.distance !== undefined &&
+        Number.isFinite(Number(best.distance))
+        ? Number(best.distance)
+        : null;
+
+    return {
+      winner,
+      best_col:
+        best?.move !== null &&
+          best?.move !== undefined &&
+          Number.isInteger(Number(best.move))
+          ? Number(best.move)
+          : null,
+      score,
+      exact: Math.abs(score) > 900000 || score === 0,
+      mateIn,
+      moves: mateIn,
+      depthReached: Number(best?.depthReached || 0),
+    };
   }
 
-  const reqId = ++this.predictionReqId;
+  formatPredictionResult(data) {
+    const winner = this.normalizePredictionWinner(data?.winner);
 
-  try {
-    const params = new URLSearchParams({
-      board: JSON.stringify(this.board),
-      player: this.current,
-      depth: "8",
-    });
+    const bestCol =
+      data?.best_col !== null &&
+        data?.best_col !== undefined &&
+        Number.isFinite(Number(data.best_col))
+        ? Number(data.best_col)
+        : null;
 
-    const data = await this.apiFetch(`/predict?${params.toString()}`, {
-      method: "GET",
-    });
+    const mateIn =
+      data?.mateIn !== null &&
+        data?.mateIn !== undefined &&
+        Number.isFinite(Number(data.mateIn))
+        ? Number(data.mateIn)
+        : null;
 
-    if (reqId !== this.predictionReqId) return;
+    const moves =
+      data?.moves !== null &&
+        data?.moves !== undefined &&
+        Number.isFinite(Number(data.moves))
+        ? Number(data.moves)
+        : null;
+
+    const score =
+      data?.score !== null &&
+        data?.score !== undefined &&
+        Number.isFinite(Number(data.score))
+        ? Number(data.score)
+        : 0;
+
+    const exact = !!data?.exact;
 
     const parts = [];
 
-    if (
-      data.best_col !== null &&
-      data.best_col !== undefined &&
-      Number.isInteger(Number(data.best_col))
-    ) {
-      parts.push(`💡 Meilleur coup : colonne ${Number(data.best_col) + 1}`);
+    if (bestCol !== null) {
+      parts.push(`💡 Meilleur coup : colonne ${bestCol + 1}`);
     }
 
-    if (data.winner === "R" || data.winner === "Y") {
-      const color = data.winner === "R" ? "Rouge" : "Jaune";
-      const n =
-        data.mateIn !== null && data.mateIn !== undefined
-          ? Number(data.mateIn)
-          : data.moves !== null && data.moves !== undefined
-          ? Number(data.moves)
-          : null;
+    if (winner === this.RED || winner === this.YELLOW) {
+      const color = winner === this.RED ? "Rouge" : "Jaune";
+      const n = mateIn ?? moves;
 
-      if (n !== null && !Number.isNaN(n)) {
-        parts.push(`🔥 ${color} gagne dans ${n} coup(s)`);
+      if (n !== null) {
+        parts.push(
+          exact
+            ? `🔥 ${color} gagne dans ${n} coup(s)`
+            : `🔥 ${color} devrait gagner dans ${n} coup(s)`
+        );
       } else {
-        parts.push(`🔥 ${color} a l'avantage`);
+        parts.push(
+          exact
+            ? `🔥 ${color} gagne`
+            : `🔥 ${color} a l’avantage`
+        );
       }
     } else {
-      const score = Number(data.score || 0);
-
-      if (score > 1000) {
-        parts.push("🟡 Jaune a l’avantage");
-      } else if (score < -1000) {
+      if (score >= 1000) {
         parts.push("🔴 Rouge a l’avantage");
+      } else if (score <= -1000) {
+        parts.push("🟡 Jaune a l’avantage");
       } else {
         parts.push("⚖️ Position équilibrée");
       }
     }
 
-    this.setPredictionText(parts.join(" | "));
-  } catch (e) {
-    if (reqId !== this.predictionReqId) return;
-    this.setPredictionText("Prédiction : indisponible");
+    return parts.length ? parts.join(" | ") : "Prédiction : indisponible";
   }
-}
-setPredictionText(text) {
-  if (!this.el.predictionText) return;
-  this._lastPredictionText = String(text || "");
-  this.el.predictionText.textContent = this._lastPredictionText;
-}
 
-resetPredictionDisplay() {
-  if (!this.el.predictionText) return;
-  this.predictionReqId++;
-  this._lastPredictionText = "Prédiction : ...";
-  this.setPredictionText("Prédiction : ...");
-}
+  formatScoreForDisplay(score, distance = null) {
+    const s = Number(score);
+    if (!Number.isFinite(s)) return "0";
 
-resetPredictionDisplay() {
-  if (!this.el.predictionText) return;
-  this.predictionReqId++;
-  this._lastPredictionText = "Prédiction : ...";
-  this.setPredictionText("Prédiction : ...");
-}
+    if (s >= 900000000) {
+      return distance !== null ? `+M${distance}` : "+WIN";
+    }
+    if (s <= -900000000) {
+      return distance !== null ? `-M${distance}` : "-WIN";
+    }
+
+    const safe = Math.max(-999999, Math.min(999999, Math.trunc(s)));
+    return String(safe);
+  }
+  async updatePrediction() {
+    if (!this.el.predictionText) return;
+
+    if (!this.board) {
+      this.setPredictionText("Prédiction : ...");
+      return;
+    }
+
+    if (this.gameOver) {
+      if (this.winner === this.RED) {
+        this.setPredictionText("Partie terminée : Rouge a gagné");
+      } else if (this.winner === this.YELLOW) {
+        this.setPredictionText("Partie terminée : Jaune a gagné");
+      } else {
+        this.setPredictionText("Partie terminée : match nul");
+      }
+      return;
+    }
+
+    const depth = this.clampInt(this.el.depth?.value, 1, 8, 6);
+
+    const cacheKey = JSON.stringify({
+      board: this.board,
+      player: this.current,
+      depth,
+    });
+
+    if (cacheKey === this._predictionCacheKey) {
+      return;
+    }
+    this._predictionCacheKey = cacheKey;
+
+    if (this._predictionTimer) {
+      clearTimeout(this._predictionTimer);
+      this._predictionTimer = null;
+    }
+
+    if (this._predictionAbortController) {
+      try {
+        this._predictionAbortController.abort();
+      } catch { }
+    }
+
+    const reqId = ++this.predictionReqId;
+
+    this._predictionTimer = setTimeout(async () => {
+      this.setPredictionText("Prédiction : analyse...");
+
+      const controller = new AbortController();
+      this._predictionAbortController = controller;
+
+      const timeoutId = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch { }
+      }, 2200);
+
+      try {
+        let data = null;
+
+        try {
+          data = await this.requestPrediction(
+            {
+              board: this.board,
+              player: this.current,
+              depth,
+            },
+            controller.signal
+          );
+        } catch {
+          data = this.localPredictPosition(this.board, this.current, depth, 1200);
+        }
+
+        clearTimeout(timeoutId);
+
+        if (reqId !== this.predictionReqId) return;
+        if (!data || typeof data !== "object") {
+          this.setPredictionText("Prédiction : indisponible");
+          return;
+        }
+
+        this.setPredictionText(this.formatPredictionResult(data));
+      } catch (e) {
+        clearTimeout(timeoutId);
+        if (reqId !== this.predictionReqId) return;
+
+        try {
+          const localData = this.localPredictPosition(this.board, this.current, depth, 1000);
+          this.setPredictionText(this.formatPredictionResult(localData));
+        } catch {
+          this.setPredictionText("Prédiction : indisponible");
+        }
+      } finally {
+        if (this._predictionAbortController === controller) {
+          this._predictionAbortController = null;
+        }
+      }
+    }, 120);
+  }
+  resetPredictionDisplay() {
+    if (this._predictionTimer) {
+      clearTimeout(this._predictionTimer);
+      this._predictionTimer = null;
+    }
+
+    if (this._predictionAbortController) {
+      try {
+        this._predictionAbortController.abort();
+      } catch { }
+      this._predictionAbortController = null;
+    }
+
+    this.predictionReqId++;
+    this._predictionCacheKey = "";
+    this._lastPredictionText = "Prédiction : ...";
+    this.setPredictionText("Prédiction : ...");
+  }
   async onlineRematchFlow() {
     if (!this.online.enabled || !this.online.code) return;
     if (this.online.rematchInFlight) return;
@@ -790,24 +960,24 @@ resetPredictionDisplay() {
   }
 
   resetLocalBoardOnly() {
-  this.clearTimers();
-  this.robotThinking = false;
-  this.aiLock = false;
+    this.clearTimers();
+    this.robotThinking = false;
+    this.aiLock = false;
 
-  this.board = this.createBoard();
-  this.moves = [];
-  this.viewIndex = 0;
-  this.current = this.startingColor;
-  this.gameOver = false;
-  this.winner = null;
-  this.winningCells = [];
+    this.board = this.createBoard();
+    this.moves = [];
+    this.viewIndex = 0;
+    this.current = this.startingColor;
+    this.gameOver = false;
+    this.winner = null;
+    this.winningCells = [];
 
-  this.resetPredictionDisplay();
+    this.resetPredictionDisplay();
 
-  this.rebuildColumnWidgets();
-  this.afterStateChange(false);
-  this.resizeCanvasReliable();
-}
+    this.rebuildColumnWidgets();
+    this.afterStateChange(false);
+    this.resizeCanvasReliable();
+  }
 
   getOnlinePlayerNameByToken(token) {
     const p = Array.isArray(this.online.players)
@@ -1060,8 +1230,8 @@ resetPredictionDisplay() {
 
     this.el.historyBody.innerHTML = arr.length
       ? arr
-          .map(
-            (x) => `
+        .map(
+          (x) => `
         <tr>
           <td>${this.escapeHtml(x.player)}</td>
           <td>${this.escapeHtml(niceType(x.type))}</td>
@@ -1071,8 +1241,8 @@ resetPredictionDisplay() {
           <td>${this.escapeHtml(this.fmtWhen(x.when))}</td>
         </tr>
       `
-          )
-          .join("")
+        )
+        .join("")
       : `<tr><td colspan="6" class="muted">Aucun historique.</td></tr>`;
   }
 
@@ -1421,31 +1591,31 @@ resetPredictionDisplay() {
   }
 
   navigateTo(index) {
-  if (this.online.enabled) {
-    alert("Online: replay désactivé (synchro en direct).");
-    return;
+    if (this.online.enabled) {
+      alert("Online: replay désactivé (synchro en direct).");
+      return;
+    }
+
+    const total = this.moves.length;
+    index = Math.max(0, Math.min(total, index));
+    this.viewIndex = index;
+
+    this.clearTimers();
+    this.robotThinking = false;
+    this.aiLock = false;
+
+    this.board = this.reconstructBoard(this.viewIndex);
+    this.current = this.inferCurrentPlayerFromBoard();
+
+    this.winningCells = [];
+    this.winner = null;
+    this.gameOver = false;
+
+    this.drawBoard();
+    this.updateStatus();
+    this.updateReplayUI();
+    this.updatePrediction();
   }
-
-  const total = this.moves.length;
-  index = Math.max(0, Math.min(total, index));
-  this.viewIndex = index;
-
-  this.clearTimers();
-  this.robotThinking = false;
-  this.aiLock = false;
-
-  this.board = this.reconstructBoard(this.viewIndex);
-  this.current = this.inferCurrentPlayerFromBoard();
-
-  this.winningCells = [];
-  this.winner = null;
-  this.gameOver = false;
-
-  this.drawBoard();
-  this.updateStatus();
-  this.updateReplayUI();
-  this.updatePrediction();
-}
 
   // ===== GAME CORE
   createBoard() {
@@ -1568,7 +1738,7 @@ resetPredictionDisplay() {
   setupResponsiveCanvas() {
     try {
       this._resizeObserver?.disconnect?.();
-    } catch {}
+    } catch { }
 
     const wrap = this.el.canvasWrap;
     if (!wrap) return;
@@ -1749,11 +1919,10 @@ resetPredictionDisplay() {
   }
 
   setPredictionText(text) {
-  if (!this.el.predictionText) return;
-  this._lastPredictionText = String(text || "");
-  this.el.predictionText.textContent = this._lastPredictionText;
-}
-
+    if (!this.el.predictionText) return;
+    this._lastPredictionText = String(text || "");
+    this.el.predictionText.textContent = this._lastPredictionText;
+  }
   // ===== AI SCORES
   setScoresBlank() {
     for (const s of this.scoreEls || []) s.textContent = "";
@@ -1839,152 +2008,6 @@ resetPredictionDisplay() {
 
     for (let c = 0; c < this.cols; c++) if (grid[0][c] === this.EMPTY) return { over: false };
     return { over: true, winner: null };
-  }
-
-  // Iterative deepening with time limit — returns { col, score }
-  runLocalBestMove(board, player, maxDepth, timeLimitMs = 1500) {
-    const opponent = this.other(player);
-    const deadline = performance.now() + timeLimitMs;
-    this._minimaxDeadline = deadline;
-    let bestResult = null;
-
-    for (let d = 1; d <= maxDepth; d++) {
-      if (performance.now() >= deadline - 30) break;
-      try {
-        const r = this.minimax(
-          this.copyGrid(board), d, -Infinity, Infinity, true, player, opponent
-        );
-        if (r && r.move !== null) bestResult = r;
-      } catch (_e) {
-        break; // timeout thrown from minimax
-      }
-      if (performance.now() >= deadline) break;
-    }
-
-    this._minimaxDeadline = null;
-
-    // depth-1 guaranteed fallback
-    if (!bestResult || bestResult.move === null) {
-      this._minimaxDeadline = null;
-      bestResult = this.minimax(
-        this.copyGrid(board), 1, -Infinity, Infinity, true, player, opponent
-      );
-    }
-    return bestResult;
-  }
-
-  minimax(grid, depth, alpha, beta, maximizingPlayer, aiPlayer, humanPlayer) {
-    // Abort if deadline exceeded (used by runLocalBestMove)
-    if (this._minimaxDeadline !== null && performance.now() >= this._minimaxDeadline) {
-      throw { timeout: true };
-    }
-    const terminal = this.terminalState(grid);
-
-    if (terminal.over) {
-      if (terminal.winner === aiPlayer) return { score: 1000000000 + depth, move: null };
-      if (terminal.winner === humanPlayer) return { score: -1000000000 - depth, move: null };
-      return { score: 0, move: null };
-    }
-
-    if (depth === 0) {
-      return { score: this.scorePosition(grid, aiPlayer), move: null };
-    }
-
-    let moves = this.validColumns(grid);
-    const center = Math.floor(this.cols / 2);
-    moves.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
-
-    let bestMove = moves.length ? moves[0] : null;
-
-    if (maximizingPlayer) {
-      let maxEval = -Infinity;
-
-      for (const col of moves) {
-        const nextGrid = this.copyGrid(grid);
-        const pos = this.dropToken(nextGrid, col, aiPlayer);
-        if (!pos) continue;
-
-        let result;
-        const aiWin = this.checkWinCells(nextGrid, pos[0], pos[1], aiPlayer);
-        if (aiWin.length) {
-          result = { score: 1000000000 + depth, move: col };
-        } else {
-          let oppCanWin = false;
-          const oppMoves = this.validColumns(nextGrid);
-
-          for (const oppCol of oppMoves) {
-            const testGrid = this.copyGrid(nextGrid);
-            const oppPos = this.dropToken(testGrid, oppCol, humanPlayer);
-            if (!oppPos) continue;
-            const oppWin = this.checkWinCells(testGrid, oppPos[0], oppPos[1], humanPlayer);
-            if (oppWin.length) {
-              oppCanWin = true;
-              break;
-            }
-          }
-
-          if (oppCanWin) {
-            result = { score: -999999999, move: col };
-          } else {
-            result = this.minimax(nextGrid, depth - 1, alpha, beta, false, aiPlayer, humanPlayer);
-          }
-        }
-
-        if (result.score > maxEval) {
-          maxEval = result.score;
-          bestMove = col;
-        }
-
-        alpha = Math.max(alpha, maxEval);
-        if (beta <= alpha) break;
-      }
-
-      return { score: maxEval, move: bestMove };
-    } else {
-      let minEval = Infinity;
-
-      for (const col of moves) {
-        const nextGrid = this.copyGrid(grid);
-        const pos = this.dropToken(nextGrid, col, humanPlayer);
-        if (!pos) continue;
-
-        let result;
-        const humanWin = this.checkWinCells(nextGrid, pos[0], pos[1], humanPlayer);
-        if (humanWin.length) {
-          result = { score: -1000000000 - depth, move: col };
-        } else {
-          let aiCanWin = false;
-          const aiMoves = this.validColumns(nextGrid);
-
-          for (const aiCol of aiMoves) {
-            const testGrid = this.copyGrid(nextGrid);
-            const aiPos = this.dropToken(testGrid, aiCol, aiPlayer);
-            if (!aiPos) continue;
-            const aiWin = this.checkWinCells(testGrid, aiPos[0], aiPos[1], aiPlayer);
-            if (aiWin.length) {
-              aiCanWin = true;
-              break;
-            }
-          }
-
-          if (aiCanWin) {
-            result = { score: 999999999, move: col };
-          } else {
-            result = this.minimax(nextGrid, depth - 1, alpha, beta, true, aiPlayer, humanPlayer);
-          }
-        }
-
-        if (result.score < minEval) {
-          minEval = result.score;
-          bestMove = col;
-        }
-
-        beta = Math.min(beta, minEval);
-        if (beta <= alpha) break;
-      }
-
-      return { score: minEval, move: bestMove };
-    }
   }
 
   getLocalZobristTable(rows, cols) {
@@ -2273,11 +2296,27 @@ resetPredictionDisplay() {
         if (!pos) {
           if (this.scoreEls[col]) this.scoreEls[col].textContent = "N/A";
         } else {
+          let rawScore = 0;
+          let distance = null;
+
           const immediateWin = this.checkWinCells(g2, pos[0], pos[1], player).length > 0;
+
+          if (immediateWin) {
+            rawScore = 1000000000;
+            distance = 1;
+          } else {
+            const result = this.minimax(g2, depth - 1, -1e18, 1e18, false, player, opponent);
+            rawScore = Number.isFinite(Number(result?.score)) ? Number(result.score) : 0;
+            distance =
+              result?.distance !== null &&
+                result?.distance !== undefined &&
+                Number.isFinite(Number(result.distance))
+                ? Number(result.distance) + 1
+                : null;
+          }
+
           if (this.scoreEls[col]) {
-            this.scoreEls[col].textContent = immediateWin
-              ? "1000000000"
-              : String(Math.trunc(this.minimax(g2, depth - 1, -1e18, 1e18, false, player, opponent).score));
+            this.scoreEls[col].textContent = this.formatScoreForDisplay(rawScore, distance);
           }
         }
       }
@@ -2573,50 +2612,50 @@ resetPredictionDisplay() {
     this.afterStateChange(false);
   }
 
- resetGame(newGame = true) {
-  this.clearTimers();
-  this.robotThinking = false;
-  this.aiLock = false;
-  this.paintMode = false;
-  this.paintColor = this.el.paintColor?.value || this.EMPTY;
-  this.updatePaintUI();
+  resetGame(newGame = true) {
+    this.clearTimers();
+    this.robotThinking = false;
+    this.aiLock = false;
+    this.paintMode = false;
+    this.paintColor = this.el.paintColor?.value || this.EMPTY;
+    this.updatePaintUI();
 
-  if (newGame) {
-    this.clearHistory();
-    this.ensureDefaultSaveName();
-    this.pushHistory({
-      player: "system",
-      type: "new",
-      game: this.gameIndex + 1,
-      move: 0,
-      col: "-",
-      when: Date.now(),
-    });
-    this.renderHistory();
+    if (newGame) {
+      this.clearHistory();
+      this.ensureDefaultSaveName();
+      this.pushHistory({
+        player: "system",
+        type: "new",
+        game: this.gameIndex + 1,
+        move: 0,
+        col: "-",
+        when: Date.now(),
+      });
+      this.renderHistory();
+    }
+
+    const cfg = this.loadConfig();
+    this.rows = cfg.rows;
+    this.cols = cfg.cols;
+    this.startingColor = cfg.starting_color;
+
+    if (newGame) this.gameIndex += 1;
+
+    this.board = this.createBoard();
+    this.current = this.startingColor;
+    this.gameOver = false;
+    this.winner = null;
+    this.winningCells = [];
+
+    this.moves = [];
+    this.viewIndex = 0;
+
+    this.resetPredictionDisplay();
+
+    this.rebuildColumnWidgets();
+    this.afterStateChange(true);
+    this.resizeCanvasReliable();
   }
-
-  const cfg = this.loadConfig();
-  this.rows = cfg.rows;
-  this.cols = cfg.cols;
-  this.startingColor = cfg.starting_color;
-
-  if (newGame) this.gameIndex += 1;
-
-  this.board = this.createBoard();
-  this.current = this.startingColor;
-  this.gameOver = false;
-  this.winner = null;
-  this.winningCells = [];
-
-  this.moves = [];
-  this.viewIndex = 0;
-
-  this.resetPredictionDisplay();
-
-  this.rebuildColumnWidgets();
-  this.afterStateChange(true);
-  this.resizeCanvasReliable();
-}
 
   // ===== JSON SAVE/LOAD
   buildSavePayload(saveName) {
@@ -2962,8 +3001,7 @@ resetPredictionDisplay() {
       const out = await this.saveGame(payload);
       const gid = out?.game_id ?? out?.id ?? "(?)";
       const target = this.isLocalPersistence() ? "en local" : "en base";
-      alert(`✅ Sauvegardé ${target} !\nID: ${gid}\nNom: ${saveName}`);
-
+      alert(`✅ Sauvegardé en base !\nID: ${gid}\nNom: ${saveName}`);
       this.pushHistory({
         player: "system",
         type: "save",
@@ -3211,6 +3249,6 @@ resetPredictionDisplay() {
 
 window.addEventListener("DOMContentLoaded", () => {
   const app = new Connect4Web();
-  app.initializeRuntime().catch(() => {});
+  app.initializeRuntime().catch(() => { });
   requestAnimationFrame(() => requestAnimationFrame(() => app.resizeCanvasReliable()));
 });
